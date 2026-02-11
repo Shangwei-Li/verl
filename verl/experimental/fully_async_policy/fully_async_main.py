@@ -57,15 +57,6 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
             if role in roles:
                 mapping[role] = "trainer_pool"
 
-    # Rollout resource pool
-    if Role.Rollout in roles:
-        assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
-        assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
-
-        rollout_pool = [config.rollout.n_gpus_per_node] * config.rollout.nnodes
-        resource_pool_spec["rollout_pool"] = rollout_pool
-        mapping[Role.Rollout] = "rollout_pool"
-
     return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
 
@@ -84,7 +75,6 @@ def create_role_worker_mapping(config):
     if use_legacy_worker_impl == "disable":
         from verl.experimental.separation.engine_workers import (
             DetachActorWorker,
-            DetachAsyncRolloutWorker,
             TrainingWorker,
         )
         from verl.single_controller.ray import RayWorkerGroup
@@ -98,7 +88,6 @@ def create_role_worker_mapping(config):
             from verl.experimental.fully_async_policy.fsdp_workers import (
                 CriticWorker,
                 DetachActorWorker,
-                DetachAsyncRolloutWorker,
             )
             from verl.single_controller.ray import RayWorkerGroup
 
@@ -109,7 +98,6 @@ def create_role_worker_mapping(config):
             from verl.experimental.fully_async_policy.megatron_worker import (
                 CriticWorker,
                 DetachActorWorker,
-                DetachAsyncRolloutWorker,
             )
             from verl.single_controller.ray import RayWorkerGroup
 
@@ -120,7 +108,6 @@ def create_role_worker_mapping(config):
     train_role = Role.ActorRollout if config.async_training.use_trainer_do_validate else Role.Actor
     role_worker_mapping = {
         train_role: ray.remote(DetachActorWorker),
-        Role.Rollout: ray.remote(DetachAsyncRolloutWorker),
         Role.Critic: ray.remote(CriticWorker),
     }
 
@@ -233,8 +220,8 @@ class FullyAsyncTaskRunner:
         rollouter = FullyAsyncRollouter.remote(
             config=config,
             tokenizer=self.components["tokenizer"],
-            role_worker_mapping={Role.Rollout: self.components["role_worker_mapping"][Role.Rollout]},
-            resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
+            role_worker_mapping=None,
+            resource_pool_manager=None,
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
             processor=self.components["processor"],
             device_name=config.trainer.device,
@@ -247,11 +234,7 @@ class FullyAsyncTaskRunner:
         print("[ASYNC MAIN] Rollouter created and initialized successfully")
 
     def _create_trainer(self, config) -> None:
-        trainer_role_mapping = {
-            role: worker_cls
-            for role, worker_cls in self.components["role_worker_mapping"].items()
-            if role != Role.Rollout
-        }
+        trainer_role_mapping = {role: worker_cls for role, worker_cls in self.components["role_worker_mapping"].items()}
 
         trainer = FullyAsyncTrainer.remote(
             config=config,
