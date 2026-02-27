@@ -213,6 +213,15 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         """Clear the shared cancellation event."""
         self.cancellation_event.clear()
 
+    def update_server_handles(self, server_handles: list[ray.actor.ActorHandle]):
+        """Update the list of server handles for the server manager.
+
+        Args:
+            server_handles (list[ray.actor.ActorHandle]): New list of server handles.
+        """
+        self.server_handles = server_handles
+        self.server_manager.update_server_handles(server_handles)
+
 
 class FullyAsyncAgentLoopManager(AgentLoopManager):
     def __init__(
@@ -349,3 +358,99 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
 
     async def clear_kv_cache(self):
         await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
+
+    async def add_replica(self, num_replicas: int = 1):
+        """Add new replicas dynamically.
+
+        Args:
+            num_replicas (int): Number of replicas to add.
+        """
+        if self.worker_group:
+            raise NotImplementedError("Dynamic replica addition is only supported in standalone mode.")
+
+        new_replicas = []
+
+        for _ in range(num_replicas):
+            # Determine the next replica rank
+            current_replicas = len(self.rollout_replicas) + len(new_replicas)
+            new_replica_rank = current_replicas
+
+            rollout_config = self.config.actor_rollout_ref.rollout
+            model_config = self.config.actor_rollout_ref.model
+
+            # Create new replica
+            new_replica = self.rollout_replica_class(
+                replica_rank=new_replica_rank,
+                config=rollout_config,
+                model_config=model_config,
+                gpus_per_node=self.config.rollout.n_gpus_per_node,
+            )
+            new_replicas.append(new_replica)
+
+        # Initialize replicas concurrently
+        await asyncio.gather(*[server.init_standalone() for server in new_replicas])
+
+        # Update internal lists
+        for new_replica in new_replicas:
+            self.rollout_replicas.append(new_replica)
+            self.server_handles.append(new_replica._server_handle)
+            self.server_addresses.append(new_replica._server_address)
+
+        print(
+            f"[FullyAsyncAgentLoopManager] Added {num_replicas} replicas. Total replicas: {len(self.rollout_replicas)}"
+        )
+        print(f"AgentLoopManager: {self.server_addresses}")
+
+        # Update workers
+        update_tasks = [worker.update_server_handles.remote(self.server_handles) for worker in self.agent_loop_workers]
+        await asyncio.gather(*update_tasks)
+
+        # Update Prometheus if enabled
+        rollout_config = self.config.actor_rollout_ref.rollout
+        if rollout_config.prometheus.enable:
+            await asyncio.to_thread(
+                update_prometheus_config, rollout_config.prometheus, self.server_addresses, rollout_config.name
+            )
+
+    async def remove_replica(self, num_replicas: int = 1):
+        """Remove replicas dynamically.
+
+        Args:
+            num_replicas (int): Number of replicas to remove.
+        """
+        if self.worker_group:
+            raise NotImplementedError("Dynamic replica removal is only supported in standalone mode.")
+
+        if not self.rollout_replicas:
+            print("[FullyAsyncAgentLoopManager] No replicas to remove.")
+            return
+
+        removed_handles = []
+
+        for _ in range(min(num_replicas, len(self.rollout_replicas))):
+            # Remove the last replica
+            self.rollout_replicas.pop()
+            removed_handle = self.server_handles.pop()
+            removed_handles.append(removed_handle)
+            self.server_addresses.pop()
+
+        print(
+            f"[FullyAsyncAgentLoopManager] Removed {len(removed_handles)} replicas. \
+                Remaining replicas: {len(self.rollout_replicas)}"
+        )
+        print(f"AgentLoopManager: {self.server_addresses}")
+
+        # Update workers first to stop sending requests to the removed replica
+        update_tasks = [worker.update_server_handles.remote(self.server_handles) for worker in self.agent_loop_workers]
+        await asyncio.gather(*update_tasks)
+
+        # Terminate the replica actors
+        for handle in removed_handles:
+            ray.kill(handle)
+
+        # Update Prometheus if enabled
+        rollout_config = self.config.actor_rollout_ref.rollout
+        if rollout_config.prometheus.enable:
+            await asyncio.to_thread(
+                update_prometheus_config, rollout_config.prometheus, self.server_addresses, rollout_config.name
+            )

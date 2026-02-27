@@ -90,6 +90,24 @@ class AsyncLLMServerManager:
         self.request_id_to_server[request_id] = server
         return server
 
+    def update_server_handles(self, server_handles: list[ray.actor.ActorHandle]):
+        """Update the list of server handles and reset load balancing structures.
+
+        Args:
+            server_handles (list[ray.actor.ActorHandle]): New list of server handles.
+        """
+        self.server_handles = server_handles
+        # Re-initialize weighted servers for load balancing
+        # Note: We reset the weights to 0. This might cause a temporary imbalance if some requests are still pending,
+        # but it's acceptable for now.
+        # We also need to preserve randomness to avoid thundering herd on the first server.
+        random.shuffle(self.server_handles)
+        self.weighted_serveres = [[0, idx, server] for idx, server in enumerate(self.server_handles)]
+        heapq.heapify(self.weighted_serveres)
+
+        # Clear the request_id cache because the old handles might be invalid
+        self.request_id_to_server.clear()
+
     @rollout_trace_op
     async def generate(
         self,
