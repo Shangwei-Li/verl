@@ -52,10 +52,13 @@ class ParameterSynchronizer:
         # Statistics
         self.current_version = 0
 
-        replicas = ray.get(rollouter.get_replicas.remote())
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+        agent_loop = ray.get(rollouter.get_async_rollout_manager.remote())
+        self.agent_loop = agent_loop
         self.checkpoint_manager = CheckpointEngineManager(
-            config=checkpoint_engine_config, trainer=self.actor_wg, replicas=replicas
+            config=checkpoint_engine_config,
+            trainer=self.actor_wg,
+            agent_loop=agent_loop,
         )
 
     def get_current_param_version(self) -> int:

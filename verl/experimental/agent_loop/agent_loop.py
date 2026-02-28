@@ -34,7 +34,7 @@ from transformers import AutoProcessor, AutoTokenizer
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
-from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
+from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
@@ -893,6 +893,52 @@ class AgentLoopManager:
 
         self._initialize_llm_servers(rollout_resource_pool)
         self._init_agent_loop_workers()
+
+    async def abort_all_requests(self):
+        """Abort all running requests in all replicas."""
+        await asyncio.gather(*[r.abort_all_requests() for r in self.rollout_replicas])
+
+    async def resume_all_requests(self):
+        """Resume all paused requests in all replicas."""
+        await asyncio.gather(*[r.resume_all_requests() for r in self.rollout_replicas])
+
+    async def sleep_replicas(self):
+        """Sleep all replicas."""
+        await asyncio.gather(*[r.sleep() for r in self.rollout_replicas])
+
+    def get_all_worker_handles(self):
+        """Get all worker handles from all replicas."""
+        workers = []
+        for replica in self.rollout_replicas:
+            workers.extend(replica.workers)
+        return workers
+
+    def get_world_size(self):
+        """Initialize checkpoint engine worker group for all replicas."""
+        from verl.checkpoint_engine.base import CheckpointEngineWorker
+
+        _worker_cls = ray.remote(CheckpointEngineWorker)
+        workers = self.get_all_worker_handles()
+        self.rollout_wg = RayWorkerGroup(
+            worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls)
+        )
+        return self.rollout_wg.world_size
+
+    def free_checkpoint_engine(self):
+        """Free checkpoint engine worker group."""
+        self.rollout_wg = None
+
+    def execute_checkpoint_engine(self, *args, **kwargs):
+        """Execute checkpoint engine methods on the worker group."""
+        if not hasattr(self, "rollout_wg") or self.rollout_wg is None:
+            raise RuntimeError("Checkpoint engine not initialized. Call init_checkpoint_engine() first.")
+        return self.rollout_wg.execute_checkpoint_engine(*args, **kwargs)
+
+    def sync_checkpoint_weights(self):
+        """Sync weights using the checkpoint engine."""
+        if not hasattr(self, "rollout_wg") or self.rollout_wg is None:
+            raise RuntimeError("Checkpoint engine not initialized. Call init_checkpoint_engine() first.")
+        return self.rollout_wg.update_weights()
 
     def _initialize_llm_servers(self, rollout_resource_pool: RayResourcePool):
         rollout_world_size = (

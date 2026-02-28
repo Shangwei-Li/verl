@@ -217,6 +217,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """Get rollout worker group"""
         return self.rollout_wg
 
+    def get_async_rollout_manager(self):
+        """Get async rollout manager"""
+        return self.async_rollout_manager
+
     def get_replicas(self):
         """Get rollout worker group"""
         return self.async_rollout_manager.rollout_replicas

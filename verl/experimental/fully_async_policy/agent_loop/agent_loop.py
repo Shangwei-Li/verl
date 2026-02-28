@@ -33,6 +33,7 @@ from verl.experimental.agent_loop.agent_loop import (
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayWorkerGroup
+from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import (
     rollout_trace_attr,
     rollout_trace_op,
@@ -359,6 +360,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
     async def clear_kv_cache(self):
         await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
 
+    @auto_await
     async def add_replica(self, num_replicas: int = 1):
         """Add new replicas dynamically.
 
@@ -412,6 +414,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
                 update_prometheus_config, rollout_config.prometheus, self.server_addresses, rollout_config.name
             )
 
+    @auto_await
     async def remove_replica(self, num_replicas: int = 1):
         """Remove replicas dynamically.
 

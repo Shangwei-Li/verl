@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Generator, TypedDict
 
@@ -20,11 +19,11 @@ import torch
 
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.single_controller.ray import RayWorkerGroup
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
-from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
+from verl.workers.rollout import BaseRollout, get_rollout_class
 
 
 class TensorMeta(TypedDict):
@@ -321,64 +320,55 @@ class CheckpointEngineManager:
     Args:
         config: The checkpoint engine config.
         trainer: The trainer worker group.
-        replicas: The list of rollout replicas.
+        agent_loop: The agent loop manager.
     """
 
     def __init__(
         self,
         config: CheckpointEngineConfig,
         trainer: RayWorkerGroup,
-        replicas: list[RolloutReplica],
+        agent_loop: Any,
     ) -> None:
         self.config = config
         self.backend = config.backend
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.trainer = trainer
-        self.replicas = replicas
+        self.agent_loop = agent_loop
 
-    def build_process_group(self, rollout: RayWorkerGroup):
+    def build_process_group(self, rollout_world_size: int):
         """Build process group for trainer and rollout replicas."""
         trainer = self.trainer
+        agent_loop = self.agent_loop
 
         # 1. prepare all workers
-        metadata = ray.get(
-            trainer.execute_checkpoint_engine(["prepare"] * trainer.world_size)
-            + rollout.execute_checkpoint_engine(["prepare"] * rollout.world_size)
-        )
+        if isinstance(agent_loop, ray.actor.ActorHandle):
+            rollout_prepare_future = agent_loop.execute_checkpoint_engine.remote(["prepare"] * rollout_world_size)
+            rollout_refs = ray.get(rollout_prepare_future)
+        else:
+            rollout_refs = agent_loop.execute_checkpoint_engine(["prepare"] * rollout_world_size)
+
+        metadata = ray.get(trainer.execute_checkpoint_engine(["prepare"] * trainer.world_size) + rollout_refs)
 
         # 2. build communication topology between all workers
         trainer_kwargs, rollout_kwargs = self.backend_cls.build_topology(
-            trainer.world_size, rollout.world_size, metadata
+            trainer.world_size, rollout_world_size, metadata
         )
         for k, v in trainer_kwargs.items():
             assert len(v) == trainer.world_size, f"trainer_kwargs[{k}] must have length of {trainer.world_size}"
         for k, v in rollout_kwargs.items():
-            assert len(v) == rollout.world_size, f"rollout_kwargs[{k}] must have length of {rollout.world_size}"
+            assert len(v) == rollout_world_size, f"rollout_kwargs[{k}] must have length of {rollout_world_size}"
 
         trainer_kwargs["method"] = ["init_process_group"] * trainer.world_size
-        rollout_kwargs["method"] = ["init_process_group"] * rollout.world_size
+        rollout_kwargs["method"] = ["init_process_group"] * rollout_world_size
 
         # 3. init process group between all workers
-        ray.get(
-            trainer.execute_checkpoint_engine(**trainer_kwargs) + rollout.execute_checkpoint_engine(**rollout_kwargs)
-        )
+        if isinstance(agent_loop, ray.actor.ActorHandle):
+            rollout_init_future = agent_loop.execute_checkpoint_engine.remote(**rollout_kwargs)
+            rollout_init_refs = ray.get(rollout_init_future)
+        else:
+            rollout_init_refs = agent_loop.execute_checkpoint_engine(**rollout_kwargs)
 
-    def add_replicas(self, replicas: list[RolloutReplica]):
-        """Add rollout replicas to the manager for elastic scale up, will rebuild process group.
-
-        Args:
-            replicas: The list of rollout replicas to add.
-        """
-        self.replicas.extend(replicas)
-
-    def remove_replicas(self, replicas: list[RolloutReplica]):
-        """Remove rollout replicas from the manager for elastic scale down, will rebuild process group.
-
-        Args:
-            replicas: The list of rollout replicas to remove.
-        """
-        replicas_set = set(replicas)
-        self.replicas = [r for r in self.replicas if r not in replicas_set]
+        ray.get(trainer.execute_checkpoint_engine(**trainer_kwargs) + rollout_init_refs)
 
     @auto_await
     async def sleep_replicas(self):
@@ -386,7 +376,10 @@ class CheckpointEngineManager:
         # skip sleep replicas for disaggregated rollout
         if self.backend != "naive":
             return
-        await asyncio.gather(*[r.sleep() for r in self.replicas])
+        if isinstance(self.agent_loop, ray.actor.ActorHandle):
+            await self.agent_loop.sleep_replicas.remote()
+        else:
+            await self.agent_loop.sleep_replicas()
 
     @auto_await
     async def update_weights(self):
@@ -398,26 +391,49 @@ class CheckpointEngineManager:
             return
 
         # 1. abort and save all unfinished requests for partial rollout
-        await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
+        if isinstance(self.agent_loop, ray.actor.ActorHandle):
+            await self.agent_loop.abort_all_requests.remote()
+        else:
+            await self.agent_loop.abort_all_requests()
 
-        # 2. create a temporay worker group for all replicas
-        workers = []
-        for replica in self.replicas:
-            workers.extend(replica.workers)
-        rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
+        # 2. init checkpoint engine
+        if isinstance(self.agent_loop, ray.actor.ActorHandle):
+            rollout_world_size = ray.get(self.agent_loop.get_world_size.remote())
+        else:
+            rollout_world_size = self.agent_loop.get_world_size()
+
         trainer = self.trainer
 
         # 3. build process group
-        self.build_process_group(rollout)
+        self.build_process_group(rollout_world_size)
 
         # 4. update weights of all workers
-        ray.get(trainer.update_weights() + rollout.update_weights())
+        if isinstance(self.agent_loop, ray.actor.ActorHandle):
+            rollout_update_ref = ray.get(self.agent_loop.sync_checkpoint_weights.remote())
+        else:
+            rollout_update_ref = self.agent_loop.sync_checkpoint_weights()
+
+        ray.get(trainer.update_weights() + rollout_update_ref)
 
         # 5. finalize all workers
-        ray.get(
-            trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size)
-            + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
-        )
+        if isinstance(self.agent_loop, ray.actor.ActorHandle):
+            rollout_finalize_future = self.agent_loop.execute_checkpoint_engine.remote(
+                ["finalize"] * rollout_world_size
+            )
+            rollout_finalize_refs = ray.get(rollout_finalize_future)
+        else:
+            rollout_finalize_refs = self.agent_loop.execute_checkpoint_engine(["finalize"] * rollout_world_size)
+
+        ray.get(trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size) + rollout_finalize_refs)
 
         # 6. resume all unfinished requests for partial rollout
-        await asyncio.gather(*[r.resume_all_requests() for r in self.replicas])
+        if isinstance(self.agent_loop, ray.actor.ActorHandle):
+            await self.agent_loop.resume_all_requests.remote()
+        else:
+            await self.agent_loop.resume_all_requests()
+
+        # 7. free checkpoint engine
+        if isinstance(self.agent_loop, ray.actor.ActorHandle):
+            self.agent_loop.free_checkpoint_engine.remote()
+        else:
+            self.agent_loop.free_checkpoint_engine()
