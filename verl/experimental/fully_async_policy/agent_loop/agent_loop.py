@@ -33,6 +33,7 @@ from verl.experimental.agent_loop.agent_loop import (
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayWorkerGroup
+from verl.utils.device import is_npu_available
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import (
     rollout_trace_attr,
@@ -359,6 +360,34 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
 
     async def clear_kv_cache(self):
         await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
+
+    @auto_await
+    async def auto_scale(self):
+        """Auto scale replicas based on available resources."""
+        if self.worker_group:
+            raise NotImplementedError("Auto scaling is only supported in standalone mode.")
+
+        rollout_world_size = (
+            self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
+            * self.config.actor_rollout_ref.rollout.data_parallel_size
+            * self.config.actor_rollout_ref.rollout.pipeline_model_parallel_size
+        )
+
+        available_resources = ray.available_resources()
+        available_gpus = available_resources.get("NPU" if is_npu_available else "GPU", 0)
+
+        num_replicas = int(available_gpus // rollout_world_size)
+        if num_replicas > 0:
+            print(
+                f"[FullyAsyncAgentLoopManager] Auto-scaling: \
+                    Found {available_gpus} available GPUs. Adding {num_replicas} new replicas."
+            )
+            await self.add_replica(num_replicas)
+        else:
+            print(
+                f"[FullyAsyncAgentLoopManager] Auto-scaling: \
+                    No sufficient resources for new replicas. Available GPUs: {available_gpus}"
+            )
 
     @auto_await
     async def add_replica(self, num_replicas: int = 1):

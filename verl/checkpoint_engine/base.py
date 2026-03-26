@@ -385,6 +385,14 @@ class CheckpointEngineManager:
     async def update_weights(self):
         """Update weights from trainer to rollout replicas."""
 
+        if hasattr(self.agent_loop, "auto_scale"):
+            await self.agent_loop.auto_scale()
+        elif isinstance(self.agent_loop, ray.actor.ActorHandle):
+            try:
+                await self.agent_loop.auto_scale.remote()
+            except Exception:
+                pass
+
         # 0. update weights for sync training with colocated trainer and rollout
         if self.backend == "naive":
             ray.get(self.trainer.update_weights())
