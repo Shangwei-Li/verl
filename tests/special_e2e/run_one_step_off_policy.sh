@@ -177,7 +177,8 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
         actor_rollout_ref.actor.use_dynamic_bsz=True \
         actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
-        actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True $@
+        actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+        actor_rollout_ref.rollout.enforce_eager=True $@
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"
     exit 1
