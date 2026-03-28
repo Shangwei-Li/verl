@@ -138,7 +138,6 @@ common_params=(
     async_training.partial_rollout="${partial_rollout}"
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
     async_training.use_trainer_do_validate=${use_trainer_do_validate}
-    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
 )
 
