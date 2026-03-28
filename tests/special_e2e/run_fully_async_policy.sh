@@ -12,6 +12,8 @@ ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 # hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 
 rollout_mode="async"
@@ -97,7 +99,7 @@ common_params=(
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz}
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode}
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.80
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.7
     actor_rollout_ref.rollout.temperature=${temperature}
     actor_rollout_ref.rollout.top_p=${top_p}
     actor_rollout_ref.rollout.top_k=${top_k}
@@ -110,6 +112,7 @@ common_params=(
     actor_rollout_ref.rollout.name=${rollout_name}
     actor_rollout_ref.rollout.mode=${rollout_mode}
     actor_rollout_ref.rollout.disable_log_stats=False
+    +actor_rollout_ref.rollout.enable_sleep_mode=False
     reward.reward_manager.name=dapo
     +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
     +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
@@ -155,14 +158,6 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
-    if [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
-        common_params+=(
-            # Todo The checkpoint_engine.backend should be unified to nccl
-            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
-        )
-        actor_offload=True
-    fi
     python3 -m verl.experimental.fully_async_policy.fully_async_main \
         "${common_params[@]}" \
         actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -190,15 +185,6 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     ref_offload=True
     actor_offload=False
 
-    if [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
-        train_tp=2
-        actor_offload=True
-        common_params+=(
-            # Todo The checkpoint_engine.backend should be unified to nccl
-            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.60
-        )
-    fi
     python3 -m verl.experimental.fully_async_policy.fully_async_main \
         --config-path=config \
         --config-name='fully_async_ppo_megatron_trainer.yaml' \
@@ -217,7 +203,8 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
-        actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@
+        actor_rollout_ref.ref.megatron.param_offload=${ref_offload} \
+        actor_rollout_ref.rollout.enforce_eager=True $@ # Expandable memory cause error with megatron
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"
     exit 1
