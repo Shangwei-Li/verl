@@ -94,6 +94,7 @@ common_params=(
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
     +actor_rollout_ref.rollout.enable_sleep_mode=False
+    actor_rollout_ref.rollout.enforce_eager=True
     reward.reward_manager.name=dapo
     +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
     +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
@@ -178,8 +179,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
         actor_rollout_ref.actor.use_dynamic_bsz=True \
         actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
-        actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
-        actor_rollout_ref.rollout.enforce_eager=True $@
+        actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True $@
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"
     exit 1
