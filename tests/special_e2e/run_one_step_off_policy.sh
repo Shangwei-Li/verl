@@ -93,6 +93,7 @@ common_params=(
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    +actor_rollout_ref.rollout.enable_sleep_mode=False
     reward.reward_manager.name=dapo
     +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
     +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
