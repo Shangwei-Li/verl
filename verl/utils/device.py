@@ -307,17 +307,7 @@ def is_support_ipc() -> bool:
     """
     # If CUDA is available, it's a GPU device
     if is_cuda_available:
-        # Check expandable memory global config
-        expandable_memory_enabled = "expandable_segments:True" in os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-        device_capability = get_device_capability()
-        # It is not suppported to enable expandable meory and IPC on old devices like L20.
-        if device_capability <= (8, 9) and expandable_memory_enabled:
-            logger.warning(
-                "Disable CUDA IPC for compability with expandable memory.This may cause performance degradation."
-            )
-            return False
-        else:
-            return True
+        return True
 
     # For NPU devices, check the software version and CANN toolkit version
     if is_npu_available:
